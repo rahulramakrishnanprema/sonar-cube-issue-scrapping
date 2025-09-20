@@ -1,6 +1,6 @@
 # Issue: AEP-201
-# Generated: 2025-09-19T17:05:53.111360
-# Thread: 6cb33746
+# Generated: 2025-09-20T07:44:19.876971
+# Thread: 45c5c760
 # Enhanced: LangChain structured generation
 # AI Model: deepseek/deepseek-chat-v3.1:free
 # Max Length: 25000 characters
@@ -10,571 +10,564 @@ import re
 import logging
 import secrets
 import string
-import time
+from datetime import datetime, timedelta
+from typing import Optional, Dict, Any, Tuple
+from functools import wraps
+
 import jwt
 import bcrypt
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from datetime import datetime, timedelta, timezone
-from functools import wraps
-from typing import Optional, Dict, Any, Tuple, List
-from dataclasses import dataclass
-from enum import Enum
-from threading import Lock
+import redis
+from pydantic import BaseModel, EmailStr, validator, constr
+from fastapi import FastAPI, HTTPException, Depends, status, Request, Header
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.exc import SQLAlchemyError, IntegrityError
+from jose import JWTError
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('auth_service.log'),
+        logging.FileHandler("auth_service.log"),
         logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
 
-class AuthError(Exception):
-    """Base authentication error class"""
-    def __init__(self, message: str, code: int = 400):
-        self.message = message
-        self.code = code
-        super().__init__(self.message)
+# Database configuration
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./aep.db")
+engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {})
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
 
-class ValidationError(AuthError):
-    """Input validation error"""
-    pass
+# Redis configuration for token blacklist
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
+redis_client = redis.from_url(REDIS_URL)
 
-class AuthenticationError(AuthError):
-    """Authentication failure error"""
-    pass
+# JWT configuration
+SECRET_KEY = os.getenv("SECRET_KEY", secrets.token_urlsafe(32))
+ALGORITHM = os.getenv("ALGORITHM", "HS256")
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
+REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7"))
 
-class AuthorizationError(AuthError):
-    """Authorization failure error"""
-    pass
+# Password requirements
+MIN_PASSWORD_LENGTH = 8
+PASSWORD_COMPLEXITY = re.compile(r'^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]')
 
-class TokenError(AuthError):
-    """Token related error"""
-    pass
+# Initialize FastAPI app
+app = FastAPI(title="AEP Authentication Service", version="1.0.0")
 
-class PasswordStrength(Enum):
-    WEAK = 1
-    MEDIUM = 2
-    STRONG = 3
+# CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-@dataclass
-class User:
-    id: str
-    email: str
-    password_hash: str
+# Database models
+class User(Base):
+    __tablename__ = "users"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String, unique=True, index=True, nullable=False)
+    hashed_password = Column(String, nullable=False)
+    full_name = Column(String, nullable=True)
+    is_active = Column(Boolean, default=True)
+    is_verified = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class PasswordResetToken(Base):
+    __tablename__ = "password_reset_tokens"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String, index=True, nullable=False)
+    token = Column(String, unique=True, nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    is_used = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+# Create tables
+Base.metadata.create_all(bind=engine)
+
+# Pydantic models
+class UserBase(BaseModel):
+    email: EmailStr
+    full_name: Optional[str] = None
+
+class UserCreate(UserBase):
+    password: constr(min_length=MIN_PASSWORD_LENGTH)
+    
+    @validator('password')
+    def validate_password_complexity(cls, v):
+        if not PASSWORD_COMPLEXITY.match(v):
+            raise ValueError('Password must contain at least one uppercase letter, one lowercase letter, one number, and one special character')
+        return v
+
+class UserResponse(UserBase):
+    id: int
     is_active: bool
     is_verified: bool
     created_at: datetime
-    last_login: Optional[datetime]
-    failed_login_attempts: int
-    last_failed_login: Optional[datetime]
+    updated_at: datetime
+    
+    class Config:
+        orm_mode = True
 
-@dataclass
-class TokenPayload:
-    user_id: str
-    email: str
-    exp: datetime
-    iat: datetime
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str
 
-class AuthConfig:
-    def __init__(self):
-        self.jwt_secret = os.getenv('JWT_SECRET', secrets.token_urlsafe(64))
-        self.jwt_expiry_minutes = int(os.getenv('JWT_EXPIRY_MINUTES', 60))
-        self.refresh_token_expiry_days = int(os.getenv('REFRESH_TOKEN_EXPIRY_DAYS', 7))
-        self.max_failed_attempts = int(os.getenv('MAX_FAILED_ATTEMPTS', 5))
-        self.lockout_minutes = int(os.getenv('LOCKOUT_MINUTES', 15))
-        self.password_min_length = int(os.getenv('PASSWORD_MIN_LENGTH', 8))
-        
-        # Email configuration
-        self.smtp_host = os.getenv('SMTP_HOST', 'smtp.gmail.com')
-        self.smtp_port = int(os.getenv('SMTP_PORT', 587))
-        self.smtp_username = os.getenv('SMTP_USERNAME', '')
-        self.smtp_password = os.getenv('SMTP_PASSWORD', '')
-        self.from_email = os.getenv('FROM_EMAIL', 'noreply@aep.com')
+class TokenResponse(BaseModel):
+    access_token: str
+    refresh_token: str
+    token_type: str = "bearer"
 
-class UserRepository:
-    def __init__(self):
-        self._users: Dict[str, User] = {}
-        self._email_index: Dict[str, str] = {}
-        self._lock = Lock()
-        self._reset_tokens: Dict[str, Tuple[str, datetime]] = {}
-        self._refresh_tokens: Dict[str, Tuple[str, datetime]] = {}
+class PasswordResetRequest(BaseModel):
+    email: EmailStr
 
-    def create_user(self, email: str, password_hash: str) -> User:
-        with self._lock:
-            if email.lower() in self._email_index:
-                raise ValidationError("Email already registered")
-            
-            user_id = secrets.token_urlsafe(16)
-            user = User(
-                id=user_id,
-                email=email.lower(),
-                password_hash=password_hash,
-                is_active=True,
-                is_verified=False,
-                created_at=datetime.now(timezone.utc),
-                last_login=None,
-                failed_login_attempts=0,
-                last_failed_login=None
-            )
-            
-            self._users[user_id] = user
-            self._email_index[email.lower()] = user_id
-            return user
+class PasswordResetConfirm(BaseModel):
+    token: str
+    new_password: constr(min_length=MIN_PASSWORD_LENGTH)
+    
+    @validator('new_password')
+    def validate_password_complexity(cls, v):
+        if not PASSWORD_COMPLEXITY.match(v):
+            raise ValueError('Password must contain at least one uppercase letter, one lowercase letter, one number, and one special character')
+        return v
 
-    def find_by_email(self, email: str) -> Optional[User]:
-        with self._lock:
-            user_id = self._email_index.get(email.lower())
-            if user_id:
-                return self._users.get(user_id)
-            return None
+class RefreshTokenRequest(BaseModel):
+    refresh_token: str
 
-    def find_by_id(self, user_id: str) -> Optional[User]:
-        with self._lock:
-            return self._users.get(user_id)
+# Database dependency
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
-    def update_user(self, user: User) -> None:
-        with self._lock:
-            if user.id not in self._users:
-                raise ValidationError("User not found")
-            self._users[user.id] = user
+# Password utilities
+def hash_password(password: str) -> str:
+    salt = bcrypt.gensalt()
+    hashed = bcrypt.hashpw(password.encode('utf-8'), salt)
+    return hashed.decode('utf-8')
 
-    def store_reset_token(self, email: str, token: str, expiry: datetime) -> None:
-        with self._lock:
-            self._reset_tokens[token] = (email.lower(), expiry)
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    return bcrypt.checkpw(plain_password.encode('utf-8'), hashed_password.encode('utf-8'))
 
-    def get_reset_token_email(self, token: str) -> Optional[str]:
-        with self._lock:
-            if token in self._reset_tokens:
-                email, expiry = self._reset_tokens[token]
-                if expiry > datetime.now(timezone.utc):
-                    return email
-                del self._reset_tokens[token]
-            return None
+# Token utilities
+def create_access_token(data: Dict[str, Any], expires_delta: Optional[timedelta] = None) -> str:
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
 
-    def remove_reset_token(self, token: str) -> None:
-        with self._lock:
-            if token in self._reset_tokens:
-                del self._reset_tokens[token]
+def create_refresh_token(data: Dict[str, Any]) -> str:
+    to_encode = data.copy()
+    expire = datetime.utcnow() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+    to_encode.update({"exp": expire, "type": "refresh"})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
 
-    def store_refresh_token(self, user_id: str, token: str, expiry: datetime) -> None:
-        with self._lock:
-            self._refresh_tokens[token] = (user_id, expiry)
+def verify_token(token: str) -> Dict[str, Any]:
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        return payload
+    except JWTError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
-    def get_refresh_token_user(self, token: str) -> Optional[str]:
-        with self._lock:
-            if token in self._refresh_tokens:
-                user_id, expiry = self._refresh_tokens[token]
-                if expiry > datetime.now(timezone.utc):
-                    return user_id
-                del self._refresh_tokens[token]
-            return None
+def is_token_blacklisted(token: str) -> bool:
+    return redis_client.exists(f"blacklist:{token}") > 0
 
-    def remove_refresh_token(self, token: str) -> None:
-        with self._lock:
-            if token in self._refresh_tokens:
-                del self._refresh_tokens[token]
+def add_token_to_blacklist(token: str, expire_in: int) -> None:
+    redis_client.setex(f"blacklist:{token}", expire_in, "1")
 
-    def cleanup_expired_tokens(self) -> None:
-        with self._lock:
-            current_time = datetime.now(timezone.utc)
-            
-            # Clean reset tokens
-            expired_tokens = [
-                token for token, (_, expiry) in self._reset_tokens.items()
-                if expiry <= current_time
-            ]
-            for token in expired_tokens:
-                del self._reset_tokens[token]
-            
-            # Clean refresh tokens
-            expired_refresh_tokens = [
-                token for token, (_, expiry) in self._refresh_tokens.items()
-                if expiry <= current_time
-            ]
-            for token in expired_refresh_tokens:
-                del self._refresh_tokens[token]
+# Auth dependencies
+class JWTBearer(HTTPBearer):
+    def __init__(self, auto_error: bool = True):
+        super(JWTBearer, self).__init__(auto_error=auto_error)
 
-class EmailService:
-    def __init__(self, config: AuthConfig):
-        self.config = config
-
-    def send_email(self, to_email: str, subject: str, body: str) -> bool:
-        try:
-            msg = MIMEMultipart()
-            msg['From'] = self.config.from_email
-            msg['To'] = to_email
-            msg['Subject'] = subject
-            msg.attach(MIMEText(body, 'html'))
-
-            with smtplib.SMTP(self.config.smtp_host, self.config.smtp_port) as server:
-                server.starttls()
-                if self.config.smtp_username and self.config.smtp_password:
-                    server.login(self.config.smtp_username, self.config.smtp_password)
-                server.send_message(msg)
-            
-            logger.info(f"Email sent to {to_email}")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to send email to {to_email}: {str(e)}")
-            return False
-
-    def send_welcome_email(self, to_email: str) -> bool:
-        subject = "Welcome to AEP - Account Created"
-        body = f"""
-        <html>
-            <body>
-                <h2>Welcome to AEP!</h2>
-                <p>Your account has been successfully created.</p>
-                <p>Email: {to_email}</p>
-                <p>Thank you for joining us!</p>
-            </body>
-        </html>
-        """
-        return self.send_email(to_email, subject, body)
-
-    def send_password_reset_email(self, to_email: str, reset_token: str) -> bool:
-        subject = "AEP - Password Reset Request"
-        body = f"""
-        <html>
-            <body>
-                <h2>Password Reset Request</h2>
-                <p>You requested to reset your password. Use the token below:</p>
-                <p><strong>Reset Token:</strong> {reset_token}</p>
-                <p>This token will expire in 1 hour.</p>
-                <p>If you didn't request this, please ignore this email.</p>
-            </body>
-        </html>
-        """
-        return self.send_email(to_email, subject, body)
-
-    def send_password_changed_email(self, to_email: str) -> bool:
-        subject = "AEP - Password Changed Successfully"
-        body = f"""
-        <html>
-            <body>
-                <h2>Password Changed</h2>
-                <p>Your password has been successfully changed.</p>
-                <p>If you didn't make this change, please contact support immediately.</p>
-            </body>
-        </html>
-        """
-        return self.send_email(to_email, subject, body)
-
-class AuthService:
-    def __init__(self):
-        self.config = AuthConfig()
-        self.user_repo = UserRepository()
-        self.email_service = EmailService(self.config)
-        
-        # Cleanup expired tokens periodically
-        import threading
-        self.cleanup_thread = threading.Thread(target=self._cleanup_loop, daemon=True)
-        self.cleanup_thread.start()
-
-    def _cleanup_loop(self):
-        while True:
-            time.sleep(3600)  # Cleanup every hour
-            self.user_repo.cleanup_expired_tokens()
-
-    def validate_email(self, email: str) -> bool:
-        pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-        return bool(re.match(pattern, email))
-
-    def validate_password_strength(self, password: str) -> PasswordStrength:
-        if len(password) < self.config.password_min_length:
-            raise ValidationError(f"Password must be at least {self.config.password_min_length} characters long")
-        
-        score = 0
-        if any(c.islower() for c in password):
-            score += 1
-        if any(c.isupper() for c in password):
-            score += 1
-        if any(c.isdigit() for c in password):
-            score += 1
-        if any(c in string.punctuation for c in password):
-            score += 1
-        
-        if score >= 4:
-            return PasswordStrength.STRONG
-        elif score >= 3:
-            return PasswordStrength.MEDIUM
+    async def __call__(self, request: Request):
+        credentials: HTTPAuthorizationCredentials = await super(JWTBearer, self).__call__(request)
+        if credentials:
+            if not credentials.scheme == "Bearer":
+                raise HTTPException(status_code=403, detail="Invalid authentication scheme.")
+            token = credentials.credentials
+            if is_token_blacklisted(token):
+                raise HTTPException(status_code=403, detail="Token has been revoked.")
+            payload = verify_token(token)
+            if payload.get("type") == "refresh":
+                raise HTTPException(status_code=403, detail="Refresh token not allowed for access.")
+            return payload
         else:
-            return PasswordStrength.WEAK
+            raise HTTPException(status_code=403, detail="Invalid authorization code.")
 
-    def hash_password(self, password: str) -> str:
-        salt = bcrypt.gensalt()
-        return bcrypt.hashpw(password.encode('utf-8'), salt).decode('utf-8')
+def get_current_user(payload: Dict[str, Any] = Depends(JWTBearer()), db: Session = Depends(get_db)) -> User:
+    email = payload.get("sub")
+    if email is None:
+        raise HTTPException(status_code=403, detail="Invalid token payload.")
+    
+    user = db.query(User).filter(User.email == email).first()
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found.")
+    if not user.is_active:
+        raise HTTPException(status_code=400, detail="Inactive user.")
+    return user
 
-    def verify_password(self, password: str, password_hash: str) -> bool:
-        return bcrypt.checkpw(password.encode('utf-8'), password_hash.encode('utf-8'))
-
-    def generate_reset_token(self) -> str:
-        return secrets.token_urlsafe(32)
-
-    def generate_refresh_token(self) -> str:
-        return secrets.token_urlsafe(64)
-
-    def create_access_token(self, user_id: str, email: str) -> str:
-        expiry = datetime.now(timezone.utc) + timedelta(minutes=self.config.jwt_expiry_minutes)
-        payload = {
-            'sub': user_id,
-            'email': email,
-            'exp': expiry,
-            'iat': datetime.now(timezone.utc)
-        }
-        return jwt.encode(payload, self.config.jwt_secret, algorithm='HS256')
-
-    def verify_access_token(self, token: str) -> TokenPayload:
-        try:
-            payload = jwt.decode(token, self.config.jwt_secret, algorithms=['HS256'])
-            return TokenPayload(
-                user_id=payload['sub'],
-                email=payload['email'],
-                exp=datetime.fromtimestamp(payload['exp'], timezone.utc),
-                iat=datetime.fromtimestamp(payload['iat'], timezone.utc)
+# Route handlers
+@app.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
+async def register(user_data: UserCreate, db: Session = Depends(get_db)):
+    try:
+        # Check if user already exists
+        existing_user = db.query(User).filter(User.email == user_data.email).first()
+        if existing_user:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="User with this email already exists."
             )
-        except jwt.ExpiredSignatureError:
-            raise TokenError("Token has expired", 401)
-        except jwt.InvalidTokenError:
-            raise TokenError("Invalid token", 401)
+        
+        # Hash password and create user
+        hashed_password = hash_password(user_data.password)
+        db_user = User(
+            email=user_data.email,
+            hashed_password=hashed_password,
+            full_name=user_data.full_name
+        )
+        
+        db.add(db_user)
+        db.commit()
+        db.refresh(db_user)
+        
+        logger.info(f"User registered successfully: {user_data.email}")
+        return db_user
+        
+    except IntegrityError:
+        db.rollback()
+        logger.error(f"Integrity error during registration for: {user_data.email}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="User with this email already exists."
+        )
+    except SQLAlchemyError as e:
+        db.rollback()
+        logger.error(f"Database error during registration: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error during registration."
+        )
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Unexpected error during registration: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error."
+        )
 
-    def register_user(self, email: str, password: str) -> Dict[str, Any]:
-        if not self.validate_email(email):
-            raise ValidationError("Invalid email format")
-        
-        password_strength = self.validate_password_strength(password)
-        if password_strength == PasswordStrength.WEAK:
-            raise ValidationError("Password is too weak. Include uppercase, lowercase, numbers, and special characters")
-        
-        password_hash = self.hash_password(password)
-        user = self.user_repo.create_user(email, password_hash)
-        
-        # Send welcome email
-        self.email_service.send_welcome_email(email)
-        
-        logger.info(f"User registered: {email}")
-        return {
-            'user_id': user.id,
-            'email': user.email,
-            'is_active': user.is_active,
-            'is_verified': user.is_verified
-        }
-
-    def login_user(self, email: str, password: str) -> Dict[str, Any]:
-        user = self.user_repo.find_by_email(email)
-        if not user:
-            raise AuthenticationError("Invalid credentials", 401)
-        
-        # Check if account is locked
-        if user.failed_login_attempts >= self.config.max_failed_attempts:
-            if user.last_failed_login and (
-                datetime.now(timezone.utc) - user.last_failed_login
-            ) < timedelta(minutes=self.config.lockout_minutes):
-                raise AuthenticationError("Account temporarily locked due to too many failed attempts", 403)
-            else:
-                # Reset failed attempts after lockout period
-                user.failed_login_attempts = 0
-                user.last_failed_login = None
+@app.post("/login", response_model=TokenResponse)
+async def login(login_data: LoginRequest, db: Session = Depends(get_db)):
+    try:
+        user = db.query(User).filter(User.email == login_data.email).first()
+        if not user or not verify_password(login_data.password, user.hashed_password):
+            logger.warning(f"Failed login attempt for: {login_data.email}")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid email or password."
+            )
         
         if not user.is_active:
-            raise AuthenticationError("Account is deactivated", 403)
+            logger.warning(f"Login attempt for inactive user: {login_data.email}")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Account is deactivated."
+            )
         
-        if not self.verify_password(password, user.password_hash):
-            user.failed_login_attempts += 1
-            user.last_failed_login = datetime.now(timezone.utc)
-            self.user_repo.update_user(user)
-            
-            if user.failed_login_attempts >= self.config.max_failed_attempts:
-                raise AuthenticationError("Account locked due to too many failed attempts", 403)
-            else:
-                raise AuthenticationError("Invalid credentials", 401)
+        access_token = create_access_token({"sub": user.email})
+        refresh_token = create_refresh_token({"sub": user.email})
         
-        # Reset failed attempts on successful login
-        user.failed_login_attempts = 0
-        user.last_failed_login = None
-        user.last_login = datetime.now(timezone.utc)
-        self.user_repo.update_user(user)
-        
-        access_token = self.create_access_token(user.id, user.email)
-        refresh_token = self.generate_refresh_token()
-        refresh_expiry = datetime.now(timezone.utc) + timedelta(days=self.config.refresh_token_expiry_days)
-        
-        self.user_repo.store_refresh_token(user.id, refresh_token, refresh_expiry)
-        
-        logger.info(f"User logged in: {email}")
+        logger.info(f"User logged in successfully: {login_data.email}")
         return {
-            'access_token': access_token,
-            'refresh_token': refresh_token,
-            'token_type': 'bearer',
-            'expires_in': self.config.jwt_expiry_minutes * 60,
-            'user': {
-                'id': user.id,
-                'email': user.email,
-                'is_verified': user.is_verified
-            }
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "token_type": "bearer"
         }
+        
+    except SQLAlchemyError as e:
+        logger.error(f"Database error during login: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error during login."
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error during login: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error."
+        )
 
-    def refresh_token(self, refresh_token: str) -> Dict[str, Any]:
-        user_id = self.user_repo.get_refresh_token_user(refresh_token)
-        if not user_id:
-            raise TokenError("Invalid refresh token", 401)
+@app.post("/refresh", response_model=TokenResponse)
+async def refresh_token(refresh_data: RefreshTokenRequest):
+    try:
+        payload = verify_token(refresh_data.refresh_token)
+        if payload.get("type") != "refresh":
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid refresh token."
+            )
         
-        user = self.user_repo.find_by_id(user_id)
-        if not user or not user.is_active:
-            raise AuthenticationError("User not found or inactive", 401)
+        if is_token_blacklisted(refresh_data.refresh_token):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Refresh token has been revoked."
+            )
         
-        # Remove used refresh token
-        self.user_repo.remove_refresh_token(refresh_token)
-        
-        # Generate new tokens
-        access_token = self.create_access_token(user.id, user.email)
-        new_refresh_token = self.generate_refresh_token()
-        refresh_expiry = datetime.now(timezone.utc) + timedelta(days=self.config.refresh_token_expiry_days)
-        
-        self.user_repo.store_refresh_token(user.id, new_refresh_token, refresh_expiry)
-        
-        logger.info(f"Token refreshed for user: {user.email}")
-        return {
-            'access_token': access_token,
-            'refresh_token': new_refresh_token,
-            'token_type': 'bearer',
-            'expires_in': self.config.jwt_expiry_minutes * 60
-        }
-
-    def logout_user(self, refresh_token: str) -> None:
-        self.user_repo.remove_refresh_token(refresh_token)
-        logger.info("User logged out")
-
-    def request_password_reset(self, email: str) -> bool:
-        user = self.user_repo.find_by_email(email)
-        if not user or not user.is_active:
-            # Don't reveal whether email exists for security
-            logger.warning(f"Password reset requested for non-existent email: {email}")
-            return True
-        
-        reset_token = self.generate_reset_token()
-        expiry = datetime.now(timezone.utc) + timedelta(hours=1)
-        
-        self.user_repo.store_reset_token(email, reset_token, expiry)
-        self.email_service.send_password_reset_email(email, reset_token)
-        
-        logger.info(f"Password reset requested for: {email}")
-        return True
-
-    def reset_password(self, reset_token: str, new_password: str) -> bool:
-        email = self.user_repo.get_reset_token_email(reset_token)
+        email = payload.get("sub")
         if not email:
-            raise TokenError("Invalid or expired reset token", 401)
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid refresh token payload."
+            )
         
-        user = self.user_repo.find_by_email(email)
-        if not user or not user.is_active:
-            raise AuthenticationError("User not found or inactive", 401)
+        # Add refresh token to blacklist
+        expire_in = int((datetime.utcfromtimestamp(payload["exp"]) - datetime.utcnow()).total_seconds())
+        add_token_to_blacklist(refresh_data.refresh_token, expire_in)
         
-        password_strength = self.validate_password_strength(new_password)
-        if password_strength == PasswordStrength.WEAK:
-            raise ValidationError("Password is too weak")
+        access_token = create_access_token({"sub": email})
+        new_refresh_token = create_refresh_token({"sub": email})
         
-        password_hash = self.hash_password(new_password)
-        user.password_hash = password_hash
-        user.failed_login_attempts = 0
-        user.last_failed_login = None
-        
-        self.user_repo.update_user(user)
-        self.user_repo.remove_reset_token(reset_token)
-        self.email_service.send_password_changed_email(email)
-        
-        logger.info(f"Password reset for: {email}")
-        return True
-
-    def change_password(self, user_id: str, current_password: str, new_password: str) -> bool:
-        user = self.user_repo.find_by_id(user_id)
-        if not user or not user.is_active:
-            raise AuthenticationError("User not found or inactive", 401)
-        
-        if not self.verify_password(current_password, user.password_hash):
-            raise AuthenticationError("Current password is incorrect", 401)
-        
-        password_strength = self.validate_password_strength(new_password)
-        if password_strength == PasswordStrength.WEAK:
-            raise ValidationError("New password is too weak")
-        
-        password_hash = self.hash_password(new_password)
-        user.password_hash = password_hash
-        user.failed_login_attempts = 0
-        user.last_failed_login = None
-        
-        self.user_repo.update_user(user)
-        self.email_service.send_password_changed_email(user.email)
-        
-        logger.info(f"Password changed for user: {user.email}")
-        return True
-
-    def verify_token(self, token: str) -> TokenPayload:
-        return self.verify_access_token(token)
-
-    def get_user_profile(self, user_id: str) -> Dict[str, Any]:
-        user = self.user_repo.find_by_id(user_id)
-        if not user or not user.is_active:
-            raise AuthenticationError("User not found or inactive", 401)
-        
+        logger.info(f"Token refreshed successfully for user: {email}")
         return {
-            'id': user.id,
-            'email': user.email,
-            'is_verified': user.is_verified,
-            'created_at': user.created_at.isoformat(),
-            'last_login': user.last_login.isoformat() if user.last_login else None
+            "access_token": access_token,
+            "refresh_token": new_refresh_token,
+            "token_type": "bearer"
         }
+        
+    except JWTError:
+        logger.warning("Invalid refresh token provided")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid refresh token."
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error during token refresh: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error."
+        )
 
-def auth_required(func):
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        auth_header = kwargs.get('authorization') or args[0].get('authorization', '') if args else ''
+@app.post("/logout")
+async def logout(
+    authorization: Optional[str] = Header(None),
+    refresh_token: Optional[str] = None
+):
+    try:
+        tokens_to_blacklist = []
         
-        if not auth_header.startswith('Bearer '):
-            raise AuthorizationError("Authorization header required", 401)
+        if authorization and authorization.startswith("Bearer "):
+            access_token = authorization[7:]
+            payload = verify_token(access_token)
+            expire_in = int((datetime.utcfromtimestamp(payload["exp"]) - datetime.utcnow()).total_seconds())
+            tokens_to_blacklist.append((access_token, expire_in))
         
-        token = auth_header[7:]
-        auth_service = AuthService()
+        if refresh_token:
+            try:
+                payload = verify_token(refresh_token)
+                expire_in = int((datetime.utcfromtimestamp(payload["exp"]) - datetime.utcnow()).total_seconds())
+                tokens_to_blacklist.append((refresh_token, expire_in))
+            except HTTPException:
+                pass  # Ignore invalid refresh tokens during logout
         
-        try:
-            payload = auth_service.verify_token(token)
-            kwargs['user_id'] = payload.user_id
-            kwargs['user_email'] = payload.email
-            return func(*args, **kwargs)
-        except TokenError as e:
-            raise AuthorizationError(e.message, e.code)
-    
-    return wrapper
+        for token, expire_in in tokens_to_blacklist:
+            add_token_to_blacklist(token, expire_in)
+        
+        logger.info("User logged out successfully")
+        return {"message": "Successfully logged out"}
+        
+    except Exception as e:
+        logger.error(f"Unexpected error during logout: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error during logout."
+        )
 
-# Example usage and test cases
+@app.post("/password-reset-request")
+async def password_reset_request(reset_data: PasswordResetRequest, db: Session = Depends(get_db)):
+    try:
+        user = db.query(User).filter(User.email == reset_data.email).first()
+        if user:
+            # Generate reset token
+            reset_token = secrets.token_urlsafe(32)
+            expires_at = datetime.utcnow() + timedelta(hours=1)
+            
+            # Store reset token in database
+            db_reset_token = PasswordResetToken(
+                email=reset_data.email,
+                token=reset_token,
+                expires_at=expires_at
+            )
+            db.add(db_reset_token)
+            db.commit()
+            
+            # In production, you would send an email here
+            logger.info(f"Password reset token generated for: {reset_data.email}")
+        
+        # Always return success to prevent email enumeration
+        return {"message": "If the email exists, a reset link has been sent."}
+        
+    except SQLAlchemyError as e:
+        db.rollback()
+        logger.error(f"Database error during password reset request: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error."
+        )
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Unexpected error during password reset request: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error."
+        )
+
+@app.post("/password-reset-confirm")
+async def password_reset_confirm(confirm_data: PasswordResetConfirm, db: Session = Depends(get_db)):
+    try:
+        # Find valid reset token
+        reset_token = db.query(PasswordResetToken).filter(
+            PasswordResetToken.token == confirm_data.token,
+            PasswordResetToken.expires_at > datetime.utcnow(),
+            PasswordResetToken.is_used == False
+        ).first()
+        
+        if not reset_token:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid or expired reset token."
+            )
+        
+        # Find user
+        user = db.query(User).filter(User.email == reset_token.email).first()
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="User not found."
+            )
+        
+        # Update password
+        user.hashed_password = hash_password(confirm_data.new_password)
+        reset_token.is_used = True
+        
+        db.commit()
+        
+        # Invalidate all existing tokens for this user
+        user_tokens = db.query(PasswordResetToken).filter(
+            PasswordResetToken.email == user.email,
+            PasswordResetToken.is_used == False
+        ).all()
+        
+        for token in user_tokens:
+            token.is_used = True
+        
+        db.commit()
+        
+        logger.info(f"Password reset successfully for: {user.email}")
+        return {"message": "Password has been reset successfully."}
+        
+    except SQLAlchemyError as e:
+        db.rollback()
+        logger.error(f"Database error during password reset confirm: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error."
+        )
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Unexpected error during password reset confirm: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error."
+        )
+
+@app.get("/me", response_model=UserResponse)
+async def get_current_user_info(current_user: User = Depends(get_current_user)):
+    return current_user
+
+@app.post("/change-password")
+async def change_password(
+    old_password: str,
+    new_password: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    try:
+        if not verify_password(old_password, current_user.hashed_password):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Current password is incorrect."
+            )
+        
+        if not PASSWORD_COMPLEXITY.match(new_password):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="New password must contain at least one uppercase letter, one lowercase letter, one number, and one special character"
+            )
+        
+        current_user.hashed_password = hash_password(new_password)
+        db.commit()
+        
+        logger.info(f"Password changed successfully for: {current_user.email}")
+        return {"message": "Password changed successfully."}
+        
+    except SQLAlchemyError as e:
+        db.rollback()
+        logger.error(f"Database error during password change: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error."
+        )
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Unexpected error during password change: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error."
+        )
+
+# Health check endpoint
+@app.get("/health")
+async def health_check():
+    try:
+        # Test database connection
+        db = SessionLocal()
+        db.execute("SELECT 1")
+        db.close()
+        
+        # Test Redis connection
+        redis_client.ping()
+        
+        return {"status": "healthy", "database": "connected", "redis": "connected"}
+    except Exception as e:
+        logger.error(f"Health check failed: {str(e)}")
+        return {"status": "unhealthy", "error": str(e)}, status.HTTP_503_SERVICE_UNAVAILABLE
+
 if __name__ == "__main__":
-    # Initialize auth service
-    auth_service = AuthService()
-    
-    # Test registration
-    try:
-        user = auth_service.register_user("test@example.com", "StrongPassword123!")
-        print("Registration successful:", user)
-    except Exception as e:
-        print("Registration failed:", str(e))
-    
-    # Test login
-    try:
-        result = auth_service.login_user("test@example.com", "StrongPassword123!")
-        print("Login successful:", result['access_token'])
-    except Exception as e:
-        print("Login failed:", str(e))
-    
-    # Test token verification
-    try:
-        token = result['access_token']
-        payload = auth_service.verify_token(token)
-        print("Token verified for user:", payload.email)
-    except Exception as e:
-        print("Token verification failed:", str(e))
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
