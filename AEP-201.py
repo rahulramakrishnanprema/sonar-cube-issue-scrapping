@@ -1,580 +1,545 @@
 # Issue: AEP-201
-# Generated: 2025-09-19T17:05:53.111360
-# Thread: 6cb33746
+# Generated: 2025-09-20T06:31:00.963303
+# Thread: 8067122d
 # Enhanced: LangChain structured generation
 # AI Model: deepseek/deepseek-chat-v3.1:free
 # Max Length: 25000 characters
 
-import os
-import re
-import logging
-import secrets
-import string
-import time
-import jwt
-import bcrypt
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from datetime import datetime, timedelta, timezone
-from functools import wraps
-from typing import Optional, Dict, Any, Tuple, List
-from dataclasses import dataclass
-from enum import Enum
-from threading import Lock
+package com.aep.auth;
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('auth_service.log'),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
+import io.jsonwebtoken.*;
+import io.jsonwebtoken.security.Keys;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.dao.DataAccessException;
+import org.springframework.dao.DuplicateKeyException;
+import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.data.redis.core.ValueOperations;
+import org.springframework.mail.javamail.JavaMailSender;
+import org.springframework.mail.javamail.MimeMessageHelper;
+import org.springframework.security.authentication.AuthenticationManager;
+import org.springframework.security.authentication.BadCredentialsException;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.AuthenticationException;
+import org.springframework.security.core.userdetails.UserDetails;
+import org.springframework.security.core.userdetails.UserDetailsService;
+import org.springframework.security.core.userdetails.UsernameNotFoundException;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
-class AuthError(Exception):
-    """Base authentication error class"""
-    def __init__(self, message: str, code: int = 400):
-        self.message = message
-        self.code = code
-        super().__init__(self.message)
+import javax.crypto.SecretKey;
+import javax.mail.MessagingException;
+import javax.mail.internet.MimeMessage;
+import javax.persistence.EntityManager;
+import javax.persistence.PersistenceContext;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
+import java.util.Date;
+import java.util.Optional;
+import java.util.UUID;
+import java.util.concurrent.TimeUnit;
+import java.util.regex.Pattern;
 
-class ValidationError(AuthError):
-    """Input validation error"""
-    pass
+@Service
+public class AuthenticationService implements UserDetailsService {
 
-class AuthenticationError(AuthError):
-    """Authentication failure error"""
-    pass
+    private static final Pattern EMAIL_PATTERN = Pattern.compile("^[A-Za-z0-9+_.-]+@[A-Za-z0-9.-]+$");
+    private static final Pattern PASSWORD_PATTERN = Pattern.compile("^(?=.*[0-9])(?=.*[a-z])(?=.*[A-Z])(?=.*[@#$%^&+=])(?=\\S+$).{8,}$");
+    private static final long JWT_EXPIRATION_MINUTES = 60;
+    private static final long PASSWORD_RESET_EXPIRATION_MINUTES = 30;
+    private static final int MAX_LOGIN_ATTEMPTS = 5;
+    private static final long LOGIN_ATTEMPT_LOCK_MINUTES = 15;
 
-class AuthorizationError(AuthError):
-    """Authorization failure error"""
-    pass
+    @PersistenceContext
+    private EntityManager entityManager;
 
-class TokenError(AuthError):
-    """Token related error"""
-    pass
+    @Autowired
+    private UserRepository userRepository;
 
-class PasswordStrength(Enum):
-    WEAK = 1
-    MEDIUM = 2
-    STRONG = 3
+    @Autowired
+    private PasswordResetTokenRepository passwordResetTokenRepository;
 
-@dataclass
-class User:
-    id: str
-    email: str
-    password_hash: str
-    is_active: bool
-    is_verified: bool
-    created_at: datetime
-    last_login: Optional[datetime]
-    failed_login_attempts: int
-    last_failed_login: Optional[datetime]
+    @Autowired
+    private RedisTemplate<String, Integer> redisTemplate;
 
-@dataclass
-class TokenPayload:
-    user_id: str
-    email: str
-    exp: datetime
-    iat: datetime
+    @Autowired
+    private JavaMailSender mailSender;
 
-class AuthConfig:
-    def __init__(self):
-        self.jwt_secret = os.getenv('JWT_SECRET', secrets.token_urlsafe(64))
-        self.jwt_expiry_minutes = int(os.getenv('JWT_EXPIRY_MINUTES', 60))
-        self.refresh_token_expiry_days = int(os.getenv('REFRESH_TOKEN_EXPIRY_DAYS', 7))
-        self.max_failed_attempts = int(os.getenv('MAX_FAILED_ATTEMPTS', 5))
-        self.lockout_minutes = int(os.getenv('LOCKOUT_MINUTES', 15))
-        self.password_min_length = int(os.getenv('PASSWORD_MIN_LENGTH', 8))
-        
-        # Email configuration
-        self.smtp_host = os.getenv('SMTP_HOST', 'smtp.gmail.com')
-        self.smtp_port = int(os.getenv('SMTP_PORT', 587))
-        self.smtp_username = os.getenv('SMTP_USERNAME', '')
-        self.smtp_password = os.getenv('SMTP_PASSWORD', '')
-        self.from_email = os.getenv('FROM_EMAIL', 'noreply@aep.com')
+    @Autowired
+    private AuthenticationManager authenticationManager;
 
-class UserRepository:
-    def __init__(self):
-        self._users: Dict[str, User] = {}
-        self._email_index: Dict[str, str] = {}
-        self._lock = Lock()
-        self._reset_tokens: Dict[str, Tuple[str, datetime]] = {}
-        self._refresh_tokens: Dict[str, Tuple[str, datetime]] = {}
+    @Value("${jwt.secret}")
+    private String jwtSecret;
 
-    def create_user(self, email: str, password_hash: str) -> User:
-        with self._lock:
-            if email.lower() in self._email_index:
-                raise ValidationError("Email already registered")
-            
-            user_id = secrets.token_urlsafe(16)
-            user = User(
-                id=user_id,
-                email=email.lower(),
-                password_hash=password_hash,
-                is_active=True,
-                is_verified=False,
-                created_at=datetime.now(timezone.utc),
-                last_login=None,
-                failed_login_attempts=0,
-                last_failed_login=None
-            )
-            
-            self._users[user_id] = user
-            self._email_index[email.lower()] = user_id
-            return user
+    @Value("${app.base-url}")
+    private String baseUrl;
 
-    def find_by_email(self, email: str) -> Optional[User]:
-        with self._lock:
-            user_id = self._email_index.get(email.lower())
-            if user_id:
-                return self._users.get(user_id)
-            return None
+    private final BCryptPasswordEncoder passwordEncoder = new BCryptPasswordEncoder();
+    private final SecretKey key = Keys.hmacShaKeyFor(jwtSecret.getBytes());
 
-    def find_by_id(self, user_id: str) -> Optional[User]:
-        with self._lock:
-            return self._users.get(user_id)
+    private static final Logger logger = LoggerFactory.getLogger(AuthenticationService.class);
 
-    def update_user(self, user: User) -> None:
-        with self._lock:
-            if user.id not in self._users:
-                raise ValidationError("User not found")
-            self._users[user.id] = user
+    @Transactional
+    public User registerUser(RegistrationRequest request) throws AuthenticationException {
+        validateRegistrationRequest(request);
 
-    def store_reset_token(self, email: str, token: str, expiry: datetime) -> None:
-        with self._lock:
-            self._reset_tokens[token] = (email.lower(), expiry)
-
-    def get_reset_token_email(self, token: str) -> Optional[str]:
-        with self._lock:
-            if token in self._reset_tokens:
-                email, expiry = self._reset_tokens[token]
-                if expiry > datetime.now(timezone.utc):
-                    return email
-                del self._reset_tokens[token]
-            return None
-
-    def remove_reset_token(self, token: str) -> None:
-        with self._lock:
-            if token in self._reset_tokens:
-                del self._reset_tokens[token]
-
-    def store_refresh_token(self, user_id: str, token: str, expiry: datetime) -> None:
-        with self._lock:
-            self._refresh_tokens[token] = (user_id, expiry)
-
-    def get_refresh_token_user(self, token: str) -> Optional[str]:
-        with self._lock:
-            if token in self._refresh_tokens:
-                user_id, expiry = self._refresh_tokens[token]
-                if expiry > datetime.now(timezone.utc):
-                    return user_id
-                del self._refresh_tokens[token]
-            return None
-
-    def remove_refresh_token(self, token: str) -> None:
-        with self._lock:
-            if token in self._refresh_tokens:
-                del self._refresh_tokens[token]
-
-    def cleanup_expired_tokens(self) -> None:
-        with self._lock:
-            current_time = datetime.now(timezone.utc)
-            
-            # Clean reset tokens
-            expired_tokens = [
-                token for token, (_, expiry) in self._reset_tokens.items()
-                if expiry <= current_time
-            ]
-            for token in expired_tokens:
-                del self._reset_tokens[token]
-            
-            # Clean refresh tokens
-            expired_refresh_tokens = [
-                token for token, (_, expiry) in self._refresh_tokens.items()
-                if expiry <= current_time
-            ]
-            for token in expired_refresh_tokens:
-                del self._refresh_tokens[token]
-
-class EmailService:
-    def __init__(self, config: AuthConfig):
-        self.config = config
-
-    def send_email(self, to_email: str, subject: str, body: str) -> bool:
-        try:
-            msg = MIMEMultipart()
-            msg['From'] = self.config.from_email
-            msg['To'] = to_email
-            msg['Subject'] = subject
-            msg.attach(MIMEText(body, 'html'))
-
-            with smtplib.SMTP(self.config.smtp_host, self.config.smtp_port) as server:
-                server.starttls()
-                if self.config.smtp_username and self.config.smtp_password:
-                    server.login(self.config.smtp_username, self.config.smtp_password)
-                server.send_message(msg)
-            
-            logger.info(f"Email sent to {to_email}")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to send email to {to_email}: {str(e)}")
-            return False
-
-    def send_welcome_email(self, to_email: str) -> bool:
-        subject = "Welcome to AEP - Account Created"
-        body = f"""
-        <html>
-            <body>
-                <h2>Welcome to AEP!</h2>
-                <p>Your account has been successfully created.</p>
-                <p>Email: {to_email}</p>
-                <p>Thank you for joining us!</p>
-            </body>
-        </html>
-        """
-        return self.send_email(to_email, subject, body)
-
-    def send_password_reset_email(self, to_email: str, reset_token: str) -> bool:
-        subject = "AEP - Password Reset Request"
-        body = f"""
-        <html>
-            <body>
-                <h2>Password Reset Request</h2>
-                <p>You requested to reset your password. Use the token below:</p>
-                <p><strong>Reset Token:</strong> {reset_token}</p>
-                <p>This token will expire in 1 hour.</p>
-                <p>If you didn't request this, please ignore this email.</p>
-            </body>
-        </html>
-        """
-        return self.send_email(to_email, subject, body)
-
-    def send_password_changed_email(self, to_email: str) -> bool:
-        subject = "AEP - Password Changed Successfully"
-        body = f"""
-        <html>
-            <body>
-                <h2>Password Changed</h2>
-                <p>Your password has been successfully changed.</p>
-                <p>If you didn't make this change, please contact support immediately.</p>
-            </body>
-        </html>
-        """
-        return self.send_email(to_email, subject, body)
-
-class AuthService:
-    def __init__(self):
-        self.config = AuthConfig()
-        self.user_repo = UserRepository()
-        self.email_service = EmailService(self.config)
-        
-        # Cleanup expired tokens periodically
-        import threading
-        self.cleanup_thread = threading.Thread(target=self._cleanup_loop, daemon=True)
-        self.cleanup_thread.start()
-
-    def _cleanup_loop(self):
-        while True:
-            time.sleep(3600)  # Cleanup every hour
-            self.user_repo.cleanup_expired_tokens()
-
-    def validate_email(self, email: str) -> bool:
-        pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-        return bool(re.match(pattern, email))
-
-    def validate_password_strength(self, password: str) -> PasswordStrength:
-        if len(password) < self.config.password_min_length:
-            raise ValidationError(f"Password must be at least {self.config.password_min_length} characters long")
-        
-        score = 0
-        if any(c.islower() for c in password):
-            score += 1
-        if any(c.isupper() for c in password):
-            score += 1
-        if any(c.isdigit() for c in password):
-            score += 1
-        if any(c in string.punctuation for c in password):
-            score += 1
-        
-        if score >= 4:
-            return PasswordStrength.STRONG
-        elif score >= 3:
-            return PasswordStrength.MEDIUM
-        else:
-            return PasswordStrength.WEAK
-
-    def hash_password(self, password: str) -> str:
-        salt = bcrypt.gensalt()
-        return bcrypt.hashpw(password.encode('utf-8'), salt).decode('utf-8')
-
-    def verify_password(self, password: str, password_hash: str) -> bool:
-        return bcrypt.checkpw(password.encode('utf-8'), password_hash.encode('utf-8'))
-
-    def generate_reset_token(self) -> str:
-        return secrets.token_urlsafe(32)
-
-    def generate_refresh_token(self) -> str:
-        return secrets.token_urlsafe(64)
-
-    def create_access_token(self, user_id: str, email: str) -> str:
-        expiry = datetime.now(timezone.utc) + timedelta(minutes=self.config.jwt_expiry_minutes)
-        payload = {
-            'sub': user_id,
-            'email': email,
-            'exp': expiry,
-            'iat': datetime.now(timezone.utc)
-        }
-        return jwt.encode(payload, self.config.jwt_secret, algorithm='HS256')
-
-    def verify_access_token(self, token: str) -> TokenPayload:
-        try:
-            payload = jwt.decode(token, self.config.jwt_secret, algorithms=['HS256'])
-            return TokenPayload(
-                user_id=payload['sub'],
-                email=payload['email'],
-                exp=datetime.fromtimestamp(payload['exp'], timezone.utc),
-                iat=datetime.fromtimestamp(payload['iat'], timezone.utc)
-            )
-        except jwt.ExpiredSignatureError:
-            raise TokenError("Token has expired", 401)
-        except jwt.InvalidTokenError:
-            raise TokenError("Invalid token", 401)
-
-    def register_user(self, email: str, password: str) -> Dict[str, Any]:
-        if not self.validate_email(email):
-            raise ValidationError("Invalid email format")
-        
-        password_strength = self.validate_password_strength(password)
-        if password_strength == PasswordStrength.WEAK:
-            raise ValidationError("Password is too weak. Include uppercase, lowercase, numbers, and special characters")
-        
-        password_hash = self.hash_password(password)
-        user = self.user_repo.create_user(email, password_hash)
-        
-        # Send welcome email
-        self.email_service.send_welcome_email(email)
-        
-        logger.info(f"User registered: {email}")
-        return {
-            'user_id': user.id,
-            'email': user.email,
-            'is_active': user.is_active,
-            'is_verified': user.is_verified
+        if (userRepository.existsByEmail(request.getEmail())) {
+            logger.warn("Registration attempt with existing email: {}", request.getEmail());
+            throw new DuplicateEmailException("Email already registered");
         }
 
-    def login_user(self, email: str, password: str) -> Dict[str, Any]:
-        user = self.user_repo.find_by_email(email)
-        if not user:
-            raise AuthenticationError("Invalid credentials", 401)
-        
-        # Check if account is locked
-        if user.failed_login_attempts >= self.config.max_failed_attempts:
-            if user.last_failed_login and (
-                datetime.now(timezone.utc) - user.last_failed_login
-            ) < timedelta(minutes=self.config.lockout_minutes):
-                raise AuthenticationError("Account temporarily locked due to too many failed attempts", 403)
-            else:
-                # Reset failed attempts after lockout period
-                user.failed_login_attempts = 0
-                user.last_failed_login = None
-        
-        if not user.is_active:
-            raise AuthenticationError("Account is deactivated", 403)
-        
-        if not self.verify_password(password, user.password_hash):
-            user.failed_login_attempts += 1
-            user.last_failed_login = datetime.now(timezone.utc)
-            self.user_repo.update_user(user)
+        try {
+            User user = new User();
+            user.setEmail(request.getEmail());
+            user.setPasswordHash(passwordEncoder.encode(request.getPassword()));
+            user.setFirstName(request.getFirstName());
+            user.setLastName(request.getLastName());
+            user.setEnabled(false);
+            user.setAccountNonLocked(true);
+            user.setVerificationToken(UUID.randomUUID().toString());
+
+            User savedUser = userRepository.save(user);
+            sendVerificationEmail(savedUser);
             
-            if user.failed_login_attempts >= self.config.max_failed_attempts:
-                raise AuthenticationError("Account locked due to too many failed attempts", 403)
-            else:
-                raise AuthenticationError("Invalid credentials", 401)
-        
-        # Reset failed attempts on successful login
-        user.failed_login_attempts = 0
-        user.last_failed_login = None
-        user.last_login = datetime.now(timezone.utc)
-        self.user_repo.update_user(user)
-        
-        access_token = self.create_access_token(user.id, user.email)
-        refresh_token = self.generate_refresh_token()
-        refresh_expiry = datetime.now(timezone.utc) + timedelta(days=self.config.refresh_token_expiry_days)
-        
-        self.user_repo.store_refresh_token(user.id, refresh_token, refresh_expiry)
-        
-        logger.info(f"User logged in: {email}")
-        return {
-            'access_token': access_token,
-            'refresh_token': refresh_token,
-            'token_type': 'bearer',
-            'expires_in': self.config.jwt_expiry_minutes * 60,
-            'user': {
-                'id': user.id,
-                'email': user.email,
-                'is_verified': user.is_verified
+            logger.info("User registered successfully: {}", savedUser.getEmail());
+            return savedUser;
+        } catch (DataAccessException e) {
+            logger.error("Database error during user registration", e);
+            throw new AuthenticationServiceException("Registration failed due to database error", e);
+        }
+    }
+
+    public AuthResponse login(LoginRequest request) throws AuthenticationException {
+        validateLoginRequest(request);
+
+        String email = request.getEmail().toLowerCase().trim();
+        checkLoginAttempts(email);
+
+        try {
+            Authentication authentication = authenticationManager.authenticate(
+                new UsernamePasswordAuthenticationToken(email, request.getPassword())
+            );
+
+            User user = (User) authentication.getPrincipal();
+            
+            if (!user.isEnabled()) {
+                logger.warn("Login attempt for unverified account: {}", email);
+                throw new AccountNotVerifiedException("Account not verified");
             }
+
+            resetLoginAttempts(email);
+            String token = generateToken(user);
+            
+            logger.info("User logged in successfully: {}", email);
+            return new AuthResponse(token, user.getId(), user.getEmail());
+        } catch (BadCredentialsException e) {
+            handleFailedLoginAttempt(email);
+            logger.warn("Failed login attempt for email: {}", email);
+            throw new BadCredentialsException("Invalid credentials");
+        }
+    }
+
+    @Transactional
+    public void initiatePasswordReset(String email) throws AuthenticationException {
+        if (!EMAIL_PATTERN.matcher(email).matches()) {
+            throw new InvalidEmailException("Invalid email format");
         }
 
-    def refresh_token(self, refresh_token: str) -> Dict[str, Any]:
-        user_id = self.user_repo.get_refresh_token_user(refresh_token)
-        if not user_id:
-            raise TokenError("Invalid refresh token", 401)
-        
-        user = self.user_repo.find_by_id(user_id)
-        if not user or not user.is_active:
-            raise AuthenticationError("User not found or inactive", 401)
-        
-        # Remove used refresh token
-        self.user_repo.remove_refresh_token(refresh_token)
-        
-        # Generate new tokens
-        access_token = self.create_access_token(user.id, user.email)
-        new_refresh_token = self.generate_refresh_token()
-        refresh_expiry = datetime.now(timezone.utc) + timedelta(days=self.config.refresh_token_expiry_days)
-        
-        self.user_repo.store_refresh_token(user.id, new_refresh_token, refresh_expiry)
-        
-        logger.info(f"Token refreshed for user: {user.email}")
-        return {
-            'access_token': access_token,
-            'refresh_token': new_refresh_token,
-            'token_type': 'bearer',
-            'expires_in': self.config.jwt_expiry_minutes * 60
+        Optional<User> userOpt = userRepository.findByEmail(email);
+        if (userOpt.isEmpty()) {
+            logger.warn("Password reset attempt for non-existent email: {}", email);
+            return; // Security: don't reveal if email exists
         }
 
-    def logout_user(self, refresh_token: str) -> None:
-        self.user_repo.remove_refresh_token(refresh_token)
-        logger.info("User logged out")
+        User user = userOpt.get();
+        String token = UUID.randomUUID().toString();
+        
+        PasswordResetToken resetToken = new PasswordResetToken();
+        resetToken.setToken(token);
+        resetToken.setUser(user);
+        resetToken.setExpiryDate(Date.from(Instant.now().plus(PASSWORD_RESET_EXPIRATION_MINUTES, ChronoUnit.MINUTES)));
+        
+        passwordResetTokenRepository.save(resetToken);
+        sendPasswordResetEmail(user, token);
+        
+        logger.info("Password reset initiated for user: {}", email);
+    }
 
-    def request_password_reset(self, email: str) -> bool:
-        user = self.user_repo.find_by_email(email)
-        if not user or not user.is_active:
-            # Don't reveal whether email exists for security
-            logger.warning(f"Password reset requested for non-existent email: {email}")
-            return True
-        
-        reset_token = self.generate_reset_token()
-        expiry = datetime.now(timezone.utc) + timedelta(hours=1)
-        
-        self.user_repo.store_reset_token(email, reset_token, expiry)
-        self.email_service.send_password_reset_email(email, reset_token)
-        
-        logger.info(f"Password reset requested for: {email}")
-        return True
+    @Transactional
+    public void completePasswordReset(PasswordResetRequest request) throws AuthenticationException {
+        validatePasswordResetRequest(request);
 
-    def reset_password(self, reset_token: str, new_password: str) -> bool:
-        email = self.user_repo.get_reset_token_email(reset_token)
-        if not email:
-            raise TokenError("Invalid or expired reset token", 401)
-        
-        user = self.user_repo.find_by_email(email)
-        if not user or not user.is_active:
-            raise AuthenticationError("User not found or inactive", 401)
-        
-        password_strength = self.validate_password_strength(new_password)
-        if password_strength == PasswordStrength.WEAK:
-            raise ValidationError("Password is too weak")
-        
-        password_hash = self.hash_password(new_password)
-        user.password_hash = password_hash
-        user.failed_login_attempts = 0
-        user.last_failed_login = None
-        
-        self.user_repo.update_user(user)
-        self.user_repo.remove_reset_token(reset_token)
-        self.email_service.send_password_changed_email(email)
-        
-        logger.info(f"Password reset for: {email}")
-        return True
-
-    def change_password(self, user_id: str, current_password: str, new_password: str) -> bool:
-        user = self.user_repo.find_by_id(user_id)
-        if not user or not user.is_active:
-            raise AuthenticationError("User not found or inactive", 401)
-        
-        if not self.verify_password(current_password, user.password_hash):
-            raise AuthenticationError("Current password is incorrect", 401)
-        
-        password_strength = self.validate_password_strength(new_password)
-        if password_strength == PasswordStrength.WEAK:
-            raise ValidationError("New password is too weak")
-        
-        password_hash = self.hash_password(new_password)
-        user.password_hash = password_hash
-        user.failed_login_attempts = 0
-        user.last_failed_login = None
-        
-        self.user_repo.update_user(user)
-        self.email_service.send_password_changed_email(user.email)
-        
-        logger.info(f"Password changed for user: {user.email}")
-        return True
-
-    def verify_token(self, token: str) -> TokenPayload:
-        return self.verify_access_token(token)
-
-    def get_user_profile(self, user_id: str) -> Dict[str, Any]:
-        user = self.user_repo.find_by_id(user_id)
-        if not user or not user.is_active:
-            raise AuthenticationError("User not found or inactive", 401)
-        
-        return {
-            'id': user.id,
-            'email': user.email,
-            'is_verified': user.is_verified,
-            'created_at': user.created_at.isoformat(),
-            'last_login': user.last_login.isoformat() if user.last_login else None
+        Optional<PasswordResetToken> tokenOpt = passwordResetTokenRepository.findByToken(request.getToken());
+        if (tokenOpt.isEmpty() || tokenOpt.get().isExpired()) {
+            logger.warn("Invalid or expired password reset token attempted");
+            throw new InvalidTokenException("Invalid or expired reset token");
         }
 
-def auth_required(func):
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        auth_header = kwargs.get('authorization') or args[0].get('authorization', '') if args else ''
+        PasswordResetToken resetToken = tokenOpt.get();
+        User user = resetToken.getUser();
         
-        if not auth_header.startswith('Bearer '):
-            raise AuthorizationError("Authorization header required", 401)
+        user.setPasswordHash(passwordEncoder.encode(request.getNewPassword()));
+        userRepository.save(user);
+        passwordResetTokenRepository.delete(resetToken);
         
-        token = auth_header[7:]
-        auth_service = AuthService()
-        
-        try:
-            payload = auth_service.verify_token(token)
-            kwargs['user_id'] = payload.user_id
-            kwargs['user_email'] = payload.email
-            return func(*args, **kwargs)
-        except TokenError as e:
-            raise AuthorizationError(e.message, e.code)
-    
-    return wrapper
+        logger.info("Password reset completed successfully for user: {}", user.getEmail());
+    }
 
-# Example usage and test cases
-if __name__ == "__main__":
-    # Initialize auth service
-    auth_service = AuthService()
+    @Transactional
+    public void verifyEmail(String token) throws AuthenticationException {
+        Optional<User> userOpt = userRepository.findByVerificationToken(token);
+        if (userOpt.isEmpty()) {
+            logger.warn("Invalid email verification token attempted");
+            throw new InvalidTokenException("Invalid verification token");
+        }
+
+        User user = userOpt.get();
+        user.setEnabled(true);
+        user.setVerificationToken(null);
+        userRepository.save(user);
+        
+        logger.info("Email verified successfully for user: {}", user.getEmail());
+    }
+
+    public boolean validateToken(String token) {
+        try {
+            Jwts.parserBuilder()
+                .setSigningKey(key)
+                .build()
+                .parseClaimsJws(token);
+            return true;
+        } catch (JwtException | IllegalArgumentException e) {
+            logger.warn("Invalid JWT token attempted: {}", e.getMessage());
+            return false;
+        }
+    }
+
+    public AuthResponse refreshToken(String oldToken) throws AuthenticationException {
+        if (!validateToken(oldToken)) {
+            throw new InvalidTokenException("Invalid token");
+        }
+
+        Claims claims = Jwts.parserBuilder()
+            .setSigningKey(key)
+            .build()
+            .parseClaimsJws(oldToken)
+            .getBody();
+
+        String email = claims.getSubject();
+        Optional<User> userOpt = userRepository.findByEmail(email);
+        
+        if (userOpt.isEmpty()) {
+            throw new UserNotFoundException("User not found");
+        }
+
+        User user = userOpt.get();
+        String newToken = generateToken(user);
+        
+        logger.info("Token refreshed for user: {}", email);
+        return new AuthResponse(newToken, user.getId(), user.getEmail());
+    }
+
+    @Override
+    public UserDetails loadUserByUsername(String email) throws UsernameNotFoundException {
+        Optional<User> userOpt = userRepository.findByEmail(email);
+        if (userOpt.isEmpty()) {
+            logger.warn("User not found: {}", email);
+            throw new UsernameNotFoundException("User not found");
+        }
+        return userOpt.get();
+    }
+
+    private String generateToken(User user) {
+        Instant now = Instant.now();
+        Instant expiry = now.plus(JWT_EXPIRATION_MINUTES, ChronoUnit.MINUTES);
+
+        return Jwts.builder()
+            .setSubject(user.getEmail())
+            .claim("userId", user.getId())
+            .setIssuedAt(Date.from(now))
+            .setExpiration(Date.from(expiry))
+            .signWith(key)
+            .compact();
+    }
+
+    private void sendVerificationEmail(User user) throws AuthenticationException {
+        try {
+            MimeMessage message = mailSender.createMimeMessage();
+            MimeMessageHelper helper = new MimeMessageHelper(message, true);
+            
+            helper.setTo(user.getEmail());
+            helper.setSubject("Verify your AEP account");
+            helper.setText(buildVerificationEmailContent(user), true);
+            
+            mailSender.send(message);
+        } catch (MessagingException e) {
+            logger.error("Failed to send verification email to: {}", user.getEmail(), e);
+            throw new EmailServiceException("Failed to send verification email");
+        }
+    }
+
+    private void sendPasswordResetEmail(User user, String token) throws AuthenticationException {
+        try {
+            MimeMessage message = mailSender.createMimeMessage();
+            MimeMessageHelper helper = new MimeMessageHelper(message, true);
+            
+            helper.setTo(user.getEmail());
+            helper.setSubject("Reset your AEP password");
+            helper.setText(buildPasswordResetEmailContent(user, token), true);
+            
+            mailSender.send(message);
+        } catch (MessagingException e) {
+            logger.error("Failed to send password reset email to: {}", user.getEmail(), e);
+            throw new EmailServiceException("Failed to send password reset email");
+        }
+    }
+
+    private String buildVerificationEmailContent(User user) {
+        String verificationUrl = baseUrl + "/auth/verify?token=" + user.getVerificationToken();
+        return "<html><body>" +
+               "<h2>Welcome to AEP!</h2>" +
+               "<p>Please click the link below to verify your email address:</p>" +
+               "<a href=\"" + verificationUrl + "\">Verify Email</a>" +
+               "</body></html>";
+    }
+
+    private String buildPasswordResetEmailContent(User user, String token) {
+        String resetUrl = baseUrl + "/auth/reset-password?token=" + token;
+        return "<html><body>" +
+               "<h2>Password Reset Request</h2>" +
+               "<p>Click the link below to reset your password:</p>" +
+               "<a href=\"" + resetUrl + "\">Reset Password</a>" +
+               "<p>This link will expire in " + PASSWORD_RESET_EXPIRATION_MINUTES + " minutes.</p>" +
+               "</body></html>";
+    }
+
+    private void checkLoginAttempts(String email) throws AuthenticationException {
+        ValueOperations<String, Integer> ops = redisTemplate.opsForValue();
+        String key = "login_attempts:" + email;
+        Integer attempts = ops.get(key);
+
+        if (attempts != null && attempts >= MAX_LOGIN_ATTEMPTS) {
+            logger.warn("Account locked due to too many failed attempts: {}", email);
+            throw new AccountLockedException("Account temporarily locked");
+        }
+    }
+
+    private void handleFailedLoginAttempt(String email) {
+        ValueOperations<String, Integer> ops = redisTemplate.opsForValue();
+        String key = "login_attempts:" + email;
+        
+        Integer attempts = ops.get(key);
+        if (attempts == null) {
+            attempts = 0;
+        }
+        
+        attempts++;
+        ops.set(key, attempts, LOGIN_ATTEMPT_LOCK_MINUTES, TimeUnit.MINUTES);
+    }
+
+    private void resetLoginAttempts(String email) {
+        redisTemplate.delete("login_attempts:" + email);
+    }
+
+    private void validateRegistrationRequest(RegistrationRequest request) {
+        if (request.getEmail() == null || !EMAIL_PATTERN.matcher(request.getEmail()).matches()) {
+            throw new InvalidEmailException("Invalid email format");
+        }
+        
+        if (request.getPassword() == null || !PASSWORD_PATTERN.matcher(request.getPassword()).matches()) {
+            throw new InvalidPasswordException("Password must be at least 8 characters with uppercase, lowercase, number and special character");
+        }
+        
+        if (request.getFirstName() == null || request.getFirstName().trim().isEmpty()) {
+            throw new InvalidInputException("First name is required");
+        }
+        
+        if (request.getLastName() == null || request.getLastName().trim().isEmpty()) {
+            throw new InvalidInputException("Last name is required");
+        }
+    }
+
+    private void validateLoginRequest(LoginRequest request) {
+        if (request.getEmail() == null || request.getEmail().trim().isEmpty()) {
+            throw new InvalidEmailException("Email is required");
+        }
+        
+        if (request.getPassword() == null || request.getPassword().isEmpty()) {
+            throw new InvalidPasswordException("Password is required");
+        }
+    }
+
+    private void validatePasswordResetRequest(PasswordResetRequest request) {
+        if (request.getToken() == null || request.getToken().isEmpty()) {
+            throw new InvalidTokenException("Reset token is required");
+        }
+        
+        if (request.getNewPassword() == null || !PASSWORD_PATTERN.matcher(request.getNewPassword()).matches()) {
+            throw new InvalidPasswordException("Password must be at least 8 characters with uppercase, lowercase, number and special character");
+        }
+    }
+}
+
+@Entity
+@Table(name = "users")
+class User implements UserDetails {
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
     
-    # Test registration
-    try:
-        user = auth_service.register_user("test@example.com", "StrongPassword123!")
-        print("Registration successful:", user)
-    except Exception as e:
-        print("Registration failed:", str(e))
+    @Column(unique = true, nullable = false)
+    private String email;
     
-    # Test login
-    try:
-        result = auth_service.login_user("test@example.com", "StrongPassword123!")
-        print("Login successful:", result['access_token'])
-    except Exception as e:
-        print("Login failed:", str(e))
+    @Column(nullable = false)
+    private String passwordHash;
     
-    # Test token verification
-    try:
-        token = result['access_token']
-        payload = auth_service.verify_token(token)
-        print("Token verified for user:", payload.email)
-    except Exception as e:
-        print("Token verification failed:", str(e))
+    @Column(nullable = false)
+    private String firstName;
+    
+    @Column(nullable = false)
+    private String lastName;
+    
+    private boolean enabled;
+    private boolean accountNonLocked;
+    private String verificationToken;
+    
+    // Getters and setters
+    // UserDetails interface methods implementation
+}
+
+@Entity
+@Table(name = "password_reset_tokens")
+class PasswordResetToken {
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+    
+    @Column(unique = true, nullable = false)
+    private String token;
+    
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "user_id", nullable = false)
+    private User user;
+    
+    @Column(nullable = false)
+    private Date expiryDate;
+    
+    public boolean isExpired() {
+        return expiryDate.before(new Date());
+    }
+    
+    // Getters and setters
+}
+
+class RegistrationRequest {
+    private String email;
+    private String password;
+    private String firstName;
+    private String lastName;
+    
+    // Getters and setters
+}
+
+class LoginRequest {
+    private String email;
+    private String password;
+    
+    // Getters and setters
+}
+
+class PasswordResetRequest {
+    private String token;
+    private String newPassword;
+    
+    // Getters and setters
+}
+
+class AuthResponse {
+    private String token;
+    private Long userId;
+    private String email;
+    
+    public AuthResponse(String token, Long userId, String email) {
+        this.token = token;
+        this.userId = userId;
+        this.email = email;
+    }
+    
+    // Getters
+}
+
+// Exception classes
+class AuthenticationServiceException extends AuthenticationException {
+    public AuthenticationServiceException(String msg, Throwable cause) {
+        super(msg, cause);
+    }
+    public AuthenticationServiceException(String msg) {
+        super(msg);
+    }
+}
+
+class DuplicateEmailException extends AuthenticationException {
+    public DuplicateEmailException(String msg) {
+        super(msg);
+    }
+}
+
+class InvalidEmailException extends AuthenticationException {
+    public InvalidEmailException(String msg) {
+        super(msg);
+    }
+}
+
+class InvalidPasswordException extends AuthenticationException {
+    public InvalidPasswordException(String msg) {
+        super(msg);
+    }
+}
+
+class InvalidTokenException extends AuthenticationException {
+    public InvalidTokenException(String msg) {
+        super(msg);
+    }
+}
+
+class AccountNotVerifiedException extends AuthenticationException {
+    public AccountNotVerifiedException(String msg) {
+        super(msg);
+    }
+}
+
+class AccountLockedException extends AuthenticationException {
+    public AccountLockedException(String msg) {
+        super(msg);
+    }
+}
+
+class UserNotFoundException extends AuthenticationException {
+    public UserNotFoundException(String msg) {
+        super(msg);
+    }
+}
+
+class EmailServiceException extends AuthenticationException {
+    public EmailServiceException(String msg) {
+        super(msg);
+    }
+}
+
+class InvalidInputException extends AuthenticationException {
+    public InvalidInputException(String msg) {
+        super(msg);
+    }
+}
+
+interface UserRepository extends JpaRepository<User, Long> {
+    Optional<User> findByEmail(String email);
+    boolean existsByEmail(String email);
+    Optional<User> findByVerificationToken(String token);
+}
+
+interface PasswordResetTokenRepository extends JpaRepository<PasswordResetToken, Long> {
+    Optional<PasswordResetToken> findByToken(String token);
+}
