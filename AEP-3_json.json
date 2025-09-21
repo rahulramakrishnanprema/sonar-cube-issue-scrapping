@@ -1,0 +1,182 @@
+{
+  "issueKey": "AEP-3",
+  "summary": "Role-Based Access Control (RBAC)",
+  "description": "As a system admin, I want role-based permissions (employee, manager, admin) so that users only access features they are authorized for.",
+  "acceptanceCriteria": [
+    "Roles stored in DB",
+    "APIs enforce access based on role",
+    "Attempt to access unauthorized routes returns error",
+    "Tests confirm correct role enforcement"
+  ],
+  "subtasks": [
+    {
+      "id": 1,
+      "description": "Define roles in DB",
+      "status": "completed",
+      "implementation": {
+        "roles": ["employee", "manager", "admin"],
+        "permissions": {
+          "employee": ["read_own_data", "update_own_profile", "access_basic_features"],
+          "manager": ["read_team_data", "approve_requests", "manage_team_members", "access_reports"],
+          "admin": ["manage_all_users", "system_configuration", "access_all_data", "audit_logs"]
+        }
+      }
+    },
+    {
+      "id": 2,
+      "description": "Add middleware for RBAC",
+      "status": "completed",
+      "implementation": {
+        "middleware": "rbacMiddleware",
+        "functions": [
+          "authenticateToken",
+          "checkRolePermissions",
+          "validateAccess",
+          "logAccessAttempts"
+        ],
+        "errorHandling": {
+          "unauthorized": {
+            "code": 403,
+            "message": "Access denied: insufficient permissions"
+          },
+          "invalidToken": {
+            "code": 401,
+            "message": "Invalid or expired token"
+          }
+        }
+      }
+    },
+    {
+      "id": 3,
+      "description": "Test endpoints with different roles",
+      "status": "completed",
+      "implementation": {
+        "testCases": [
+          {
+            "role": "employee",
+            "endpoints": [
+              "/api/profile",
+              "/api/tasks",
+              "/api/notifications"
+            ],
+            "expected": "access_granted"
+          },
+          {
+            "role": "employee",
+            "endpoints": [
+              "/api/admin/users",
+              "/api/system/config"
+            ],
+            "expected": "access_denied"
+          },
+          {
+            "role": "manager",
+            "endpoints": [
+              "/api/team/reports",
+              "/api/approvals",
+              "/api/team/members"
+            ],
+            "expected": "access_granted"
+          },
+          {
+            "role": "admin",
+            "endpoints": [
+              "/api/admin/*",
+              "/api/system/*",
+              "/api/audit/logs"
+            ],
+            "expected": "access_granted"
+          }
+        ]
+      }
+    }
+  ],
+  "databaseSchema": {
+    "roles": {
+      "tableName": "user_roles",
+      "columns": [
+        "id",
+        "role_name",
+        "permissions",
+        "created_at",
+        "updated_at"
+      ]
+    },
+    "userRoles": {
+      "tableName": "user_role_mapping",
+      "columns": [
+        "user_id",
+        "role_id",
+        "assigned_at",
+        "assigned_by"
+      ]
+    }
+  },
+  "apiEndpoints": {
+    "protectedEndpoints": [
+      {
+        "path": "/api/admin/*",
+        "requiredRole": "admin",
+        "methods": ["GET", "POST", "PUT", "DELETE"]
+      },
+      {
+        "path": "/api/manager/*",
+        "requiredRole": "manager",
+        "methods": ["GET", "POST", "PUT"]
+      },
+      {
+        "path": "/api/profile",
+        "requiredRole": "employee",
+        "methods": ["GET", "PUT"]
+      },
+      {
+        "path": "/api/reports",
+        "requiredRole": "manager",
+        "methods": ["GET"]
+      }
+    ]
+  },
+  "logging": {
+    "accessLogs": {
+      "enabled": true,
+      "level": "info",
+      "fields": [
+        "timestamp",
+        "userId",
+        "role",
+        "endpoint",
+        "method",
+        "status",
+        "ipAddress"
+      ]
+    },
+    "securityLogs": {
+      "enabled": true,
+      "level": "warn",
+      "fields": [
+        "timestamp",
+        "userId",
+        "attemptedEndpoint",
+        "requiredRole",
+        "userRole",
+        "ipAddress",
+        "result"
+      ]
+    }
+  },
+  "errorCodes": {
+    "RBAC_001": "Invalid role configuration",
+    "RBAC_002": "Permission denied",
+    "RBAC_003": "Role not found",
+    "RBAC_004": "Token validation failed",
+    "RBAC_005": "Access timeout"
+  },
+  "version": "1.0.0",
+  "lastUpdated": "2024-01-15T10:30:00Z",
+  "dependencies": {
+    "authentication": "jwt-tokens",
+    "database": "postgresql",
+    "logging": "winston",
+    "framework": "express.js"
+  }
+}
