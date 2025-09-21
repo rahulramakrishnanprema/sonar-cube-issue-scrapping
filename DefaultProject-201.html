@@ -1,0 +1,499 @@
+# Generated for DefaultProject-201 | 2025-09-21 06:18:57 | Developer Agent v2.0
+# AutoFlow-Dashboard Enhanced Code Generation
+# Thread: d44a8b52 | LangChain: Template-Enhanced Generation
+# Workflow Stage: Code Generation (NO PR creation)
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DefaultProject Authentication</title>
+    <style>
+        :root {
+            --primary-color: #2563eb;
+            --secondary-color: #1e40af;
+            --error-color: #ef4444;
+            --success-color: #10b981;
+            --text-color: #374151;
+            --bg-color: #f9fafb;
+            --card-bg: #ffffff;
+            --border-color: #e5e7eb;
+        }
+        
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            line-height: 1.6;
+        }
+        
+        .container {
+            max-width: 400px;
+            margin: 2rem auto;
+            padding: 2rem;
+            background: var(--card-bg);
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+            border: 1px solid var(--border-color);
+        }
+        
+        h1 {
+            text-align: center;
+            margin-bottom: 1.5rem;
+            color: var(--primary-color);
+            font-size: 1.8rem;
+        }
+        
+        .form-group {
+            margin-bottom: 1rem;
+        }
+        
+        label {
+            display: block;
+            margin-bottom: 0.5rem;
+            font-weight: 500;
+        }
+        
+        input[type="email"],
+        input[type="password"],
+        input[type="text"] {
+            width: 100%;
+            padding: 0.75rem;
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            font-size: 1rem;
+            transition: border-color 0.3s;
+        }
+        
+        input:focus {
+            outline: none;
+            border-color: var(--primary-color);
+            box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+        }
+        
+        button {
+            width: 100%;
+            padding: 0.75rem;
+            background-color: var(--primary-color);
+            color: white;
+            border: none;
+            border-radius: 4px;
+            font-size: 1rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        
+        button:hover {
+            background-color: var(--secondary-color);
+        }
+        
+        button:disabled {
+            background-color: #9ca3af;
+            cursor: not-allowed;
+        }
+        
+        .error-message {
+            color: var(--error-color);
+            font-size: 0.875rem;
+            margin-top: 0.25rem;
+            display: none;
+        }
+        
+        .success-message {
+            color: var(--success-color);
+            font-size: 0.875rem;
+            margin-top: 0.25rem;
+            display: none;
+        }
+        
+        .form-footer {
+            text-align: center;
+            margin-top: 1rem;
+            font-size: 0.875rem;
+        }
+        
+        .form-footer a {
+            color: var(--primary-color);
+            text-decoration: none;
+            cursor: pointer;
+        }
+        
+        .form-footer a:hover {
+            text-decoration: underline;
+        }
+        
+        .tabs {
+            display: flex;
+            margin-bottom: 1.5rem;
+            border-bottom: 1px solid var(--border-color);
+        }
+        
+        .tab {
+            flex: 1;
+            padding: 0.75rem;
+            text-align: center;
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
+        }
+        
+        .tab.active {
+            border-bottom-color: var(--primary-color);
+            color: var(--primary-color);
+            font-weight: 500;
+        }
+        
+        .form-section {
+            display: none;
+        }
+        
+        .form-section.active {
+            display: block;
+        }
+        
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 2px solid #f3f3f3;
+            border-top: 2px solid var(--primary-color);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>DefaultProject Authentication</h1>
+        
+        <div class="tabs">
+            <div class="tab active" data-tab="login">Login</div>
+            <div class="tab" data-tab="register">Register</div>
+            <div class="tab" data-tab="reset">Reset Password</div>
+        </div>
+        
+        <!-- Login Form -->
+        <div id="login-form" class="form-section active">
+            <div class="form-group">
+                <label for="login-email">Email</label>
+                <input type="email" id="login-email" required>
+                <div class="error-message" id="login-email-error"></div>
+            </div>
+            
+            <div class="form-group">
+                <label for="login-password">Password</label>
+                <input type="password" id="login-password" required>
+                <div class="error-message" id="login-password-error"></div>
+            </div>
+            
+            <button type="button" id="login-btn" onclick="handleLogin()">Login</button>
+            
+            <div class="form-footer">
+                <a href="#" onclick="showTab('reset')">Forgot password?</a>
+            </div>
+        </div>
+        
+        <!-- Registration Form -->
+        <div id="register-form" class="form-section">
+            <div class="form-group">
+                <label for="register-name">Full Name</label>
+                <input type="text" id="register-name" required>
+                <div class="error-message" id="register-name-error"></div>
+            </div>
+            
+            <div class="form-group">
+                <label for="register-email">Email</label>
+                <input type="email" id="register-email" required>
+                <div class="error-message" id="register-email-error"></div>
+            </div>
+            
+            <div class="form-group">
+                <label for="register-password">Password</label>
+                <input type="password" id="register-password" required minlength="6">
+                <div class="error-message" id="register-password-error"></div>
+            </div>
+            
+            <div class="form-group">
+                <label for="register-confirm">Confirm Password</label>
+                <input type="password" id="register-confirm" required>
+                <div class="error-message" id="register-confirm-error"></div>
+            </div>
+            
+            <button type="button" id="register-btn" onclick="handleRegister()">Register</button>
+        </div>
+        
+        <!-- Password Reset Form -->
+        <div id="reset-form" class="form-section">
+            <div class="form-group">
+                <label for="reset-email">Email</label>
+                <input type="email" id="reset-email" required>
+                <div class="error-message" id="reset-email-error"></div>
+            </div>
+            
+            <button type="button" id="reset-btn" onclick="handleReset()">Send Reset Link</button>
+            
+            <div class="form-footer">
+                <a href="#" onclick="showTab('login')">Back to Login</a>
+            </div>
+        </div>
+        
+        <!-- Success/Error Messages -->
+        <div id="global-message" class="success-message"></div>
+    </div>
+
+    <script>
+        // DefaultProject-201: Authentication System Implementation
+        const API_BASE_URL = 'https://api.defaultproject.com';
+        let authToken = localStorage.getItem('authToken');
+        
+        function showTab(tabName) {
+            document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
+            document.querySelectorAll('.form-section').forEach(section => section.classList.remove('active'));
+            
+            document.querySelector(`[data-tab="${tabName}"]`).classList.add('active');
+            document.getElementById(`${tabName}-form`).classList.add('active');
+            
+            clearMessages();
+        }
+        
+        function clearMessages() {
+            document.querySelectorAll('.error-message').forEach(el => {
+                el.style.display = 'none';
+                el.textContent = '';
+            });
+            const globalMsg = document.getElementById('global-message');
+            globalMsg.style.display = 'none';
+            globalMsg.textContent = '';
+            globalMsg.classList.remove('success-message', 'error-message');
+        }
+        
+        function showError(elementId, message) {
+            const el = document.getElementById(elementId);
+            el.textContent = message;
+            el.style.display = 'block';
+            el.classList.add('error-message');
+            el.classList.remove('success-message');
+        }
+        
+        function showGlobalMessage(message, isSuccess = true) {
+            const el = document.getElementById('global-message');
+            el.textContent = message;
+            el.style.display = 'block';
+            el.classList.toggle('success-message', isSuccess);
+            el.classList.toggle('error-message', !isSuccess);
+        }
+        
+        function validateEmail(email) {
+            const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+            return emailRegex.test(email);
+        }
+        
+        function validatePassword(password) {
+            return password.length >= 6;
+        }
+        
+        async function handleLogin() {
+            clearMessages();
+            
+            const email = document.getElementById('login-email').value.trim();
+            const password = document.getElementById('login-password').value;
+            
+            if (!email) {
+                showError('login-email-error', 'Email is required');
+                return;
+            }
+            
+            if (!validateEmail(email)) {
+                showError('login-email-error', 'Please enter a valid email');
+                return;
+            }
+            
+            if (!password) {
+                showError('login-password-error', 'Password is required');
+                return;
+            }
+            
+            const btn = document.getElementById('login-btn');
+            btn.disabled = true;
+            btn.innerHTML = '<div class="loading"></div>';
+            
+            try {
+                const response = await fetch(`${API_BASE_URL}/auth/login`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ email, password })
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    authToken = data.token;
+                    localStorage.setItem('authToken', authToken);
+                    showGlobalMessage('Login successful! Redirecting...', true);
+                    setTimeout(() => {
+                        window.location.href = '/dashboard';
+                    }, 1000);
+                } else {
+                    showGlobalMessage(data.message || 'Login failed', false);
+                }
+            } catch (error) {
+                console.error('Login error:', error);
+                showGlobalMessage('Network error. Please try again.', false);
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Login';
+            }
+        }
+        
+        async function handleRegister() {
+            clearMessages();
+            
+            const name = document.getElementById('register-name').value.trim();
+            const email = document.getElementById('register-email').value.trim();
+            const password = document.getElementById('register-password').value;
+            const confirmPassword = document.getElementById('register-confirm').value;
+            
+            if (!name) {
+                showError('register-name-error', 'Full name is required');
+                return;
+            }
+            
+            if (!email) {
+                showError('register-email-error', 'Email is required');
+                return;
+            }
+            
+            if (!validateEmail(email)) {
+                showError('register-email-error', 'Please enter a valid email');
+                return;
+            }
+            
+            if (!password) {
+                showError('register-password-error', 'Password is required');
+                return;
+            }
+            
+            if (!validatePassword(password)) {
+                showError('register-password-error', 'Password must be at least 6 characters');
+                return;
+            }
+            
+            if (password !== confirmPassword) {
+                showError('register-confirm-error', 'Passwords do not match');
+                return;
+            }
+            
+            const btn = document.getElementById('register-btn');
+            btn.disabled = true;
+            btn.innerHTML = '<div class="loading"></div>';
+            
+            try {
+                const response = await fetch(`${API_BASE_URL}/auth/register`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ name, email, password })
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    showGlobalMessage('Registration successful! Please login.', true);
+                    setTimeout(() => showTab('login'), 2000);
+                } else {
+                    showGlobalMessage(data.message || 'Registration failed', false);
+                }
+            } catch (error) {
+                console.error('Registration error:', error);
+                showGlobalMessage('Network error. Please try again.', false);
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Register';
+            }
+        }
+        
+        async function handleReset() {
+            clearMessages();
+            
+            const email = document.getElementById('reset-email').value.trim();
+            
+            if (!email) {
+                showError('reset-email-error', 'Email is required');
+                return;
+            }
+            
+            if (!validateEmail(email)) {
+                showError('reset-email-error', 'Please enter a valid email');
+                return;
+            }
+            
+            const btn = document.getElementById('reset-btn');
+            btn.disabled = true;
+            btn.innerHTML = '<div class="loading"></div>';
+            
+            try {
+                const response = await fetch(`${API_BASE_URL}/auth/reset-password`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ email })
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    showGlobalMessage('Password reset link sent to your email', true);
+                } else {
+                    showGlobalMessage(data.message || 'Failed to send reset link', false);
+                }
+            } catch (error) {
+                console.error('Password reset error:', error);
+                showGlobalMessage('Network error. Please try again.', false);
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Send Reset Link';
+            }
+        }
+        
+        // Initialize tabs
+        document.querySelectorAll('.tab').forEach(tab => {
+            tab.addEventListener('click', () => {
+                showTab(tab.dataset.tab);
+            });
+        });
+        
+        // Check if user is already logged in
+        if (authToken) {
+            window.location.href = '/dashboard';
+        }
+        
+        // Add input validation on blur
+        document.querySelectorAll('input').forEach(input => {
+            input.addEventListener('blur', () => {
+                const id = input.id;
+                const value = input.value.trim();
+                
+                if (id.includes('email') && value && !validateEmail(value)) {
+                    showError(`${id}-error`, 'Please enter a valid email');
+                }
+            });
+        });
+    </script>
+</body>
+</html>

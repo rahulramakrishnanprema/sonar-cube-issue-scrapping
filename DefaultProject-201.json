@@ -1,0 +1,62 @@
+# Generated for DefaultProject-201 | 2025-09-21 06:35:10 | Developer Agent v2.0
+# AutoFlow-Dashboard Enhanced Code Generation
+# Thread: d44a8b52 | LangChain: Template-Enhanced Generation
+# Workflow Stage: Code Generation (NO PR creation)
+
+{
+  "name": "DefaultProject-201",
+  "version": "1.0.0",
+  "description": "User authentication system for DefaultProject including registration, login, password reset, and JWT token management",
+  "main": "DefaultProject-201.js",
+  "scripts": {
+    "start": "node DefaultProject-201.js",
+    "dev": "nodemon DefaultProject-201.js",
+    "test": "jest"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "bcryptjs": "^2.4.3",
+    "jsonwebtoken": "^9.0.2",
+    "mongoose": "^7.5.0",
+    "validator": "^13.11.0",
+    "cors": "^2.8.5",
+    "helmet": "^7.0.0",
+    "express-rate-limit": "^6.10.0",
+    "nodemailer": "^6.9.7",
+    "crypto": "^1.0.1",
+    "winston": "^3.10.0"
+  },
+  "devDependencies": {
+    "jest": "^29.6.4",
+    "nodemon": "^3.0.1",
+    "supertest": "^6.3.3"
+  },
+  "keywords": [
+    "authentication",
+    "jwt",
+    "user-management",
+    "security"
+  ],
+  "author": "DefaultProject Team",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/defaultproject/authentication-system.git"
+  },
+  "bugs": {
+    "url": "https://github.com/defaultproject/authentication-system/issues"
+  },
+  "homepage": "https://github.com/defaultproject/authentication-system#readme",
+  "config": {
+    "jwtSecret": "defaultproject_201_jwt_secret_key_2025",
+    "jwtExpiration": "24h",
+    "passwordResetExpiration": "1h",
+    "rateLimit": {
+      "windowMs": 900000,
+      "max": 100
+    }
+  }
+}
