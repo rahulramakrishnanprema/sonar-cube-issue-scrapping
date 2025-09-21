@@ -1,0 +1,59 @@
+{
+  "issueKey": "AEP-2",
+  "apis": {
+    "login": {
+      "endpoint": "/api/login",
+      "method": "POST",
+      "description": "Endpoint to authenticate user and issue JWT token",
+      "request": {
+        "username": "string",
+        "password": "string"
+      },
+      "response": {
+        "token": "string"
+      }
+    },
+    "register": {
+      "endpoint": "/api/register",
+      "method": "POST",
+      "description": "Endpoint to register new user",
+      "request": {
+        "username": "string",
+        "password": "string",
+        "email": "string"
+      },
+      "response": {
+        "message": "string"
+      }
+    }
+  },
+  "jwtConfig": {
+    "secretKey": "superSecretKey",
+    "expiresIn": "1h"
+  },
+  "errorMessages": {
+    "invalidCredentials": "Invalid username or password",
+    "userExists": "User already exists"
+  },
+  "testCases": {
+    "loginSuccess": {
+      "input": {
+        "username": "testUser",
+        "password": "testPassword"
+      },
+      "expectedOutput": {
+        "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VybmFtZSI6InRlc3RVc2VyIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+      }
+    },
+    "registerSuccess": {
+      "input": {
+        "username": "newUser",
+        "password": "newPassword",
+        "email": "newUser@example.com"
+      },
+      "expectedOutput": {
+        "message": "User registered successfully"
+      }
+    }
+  }
+}
