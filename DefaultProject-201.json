@@ -1,0 +1,104 @@
+# Generated for DefaultProject-201 | 2025-09-21 06:34:36 | Developer Agent v2.0
+# AutoFlow-Dashboard Enhanced Code Generation
+# Thread: ce6dd025 | LangChain: Template-Enhanced Generation
+# Workflow Stage: Code Generation (NO PR creation)
+
+{
+  "name": "DefaultProject-201",
+  "version": "1.0.0",
+  "description": "User authentication system for DefaultProject including registration, login, password reset, and JWT token management",
+  "main": "DefaultProject-201.js",
+  "scripts": {
+    "start": "node DefaultProject-201.js",
+    "dev": "nodemon DefaultProject-201.js",
+    "test": "jest --verbose",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "jsonwebtoken": "^9.0.2",
+    "bcryptjs": "^2.4.3",
+    "validator": "^13.11.0",
+    "nodemailer": "^6.9.7",
+    "cors": "^2.8.5",
+    "helmet": "^7.1.0",
+    "express-rate-limit": "^6.10.0",
+    "winston": "^3.10.0",
+    "dotenv": "^16.3.1",
+    "uuid": "^9.0.1"
+  },
+  "devDependencies": {
+    "jest": "^29.6.4",
+    "supertest": "^6.3.3",
+    "nodemon": "^3.0.1",
+    "eslint": "^8.47.0"
+  },
+  "keywords": [
+    "authentication",
+    "jwt",
+    "security",
+    "user-management"
+  ],
+  "author": "DefaultProject Team",
+  "license": "MIT",
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/defaultproject/auth-system.git"
+  },
+  "bugs": {
+    "url": "https://github.com/defaultproject/auth-system/issues"
+  },
+  "homepage": "https://github.com/defaultproject/auth-system#readme",
+  "config": {
+    "jwtSecret": "defaultproject_secure_jwt_secret_2025",
+    "jwtExpiration": "24h",
+    "passwordResetExpiration": "1h",
+    "rateLimit": {
+      "windowMs": 900000,
+      "max": 100
+    }
+  },
+  "environment": {
+    "development": {
+      "database": "mongodb://localhost:27017/defaultproject_dev",
+      "emailService": "gmail",
+      "logLevel": "debug"
+    },
+    "production": {
+      "database": "mongodb://production:27017/defaultproject",
+      "emailService": "sendgrid",
+      "logLevel": "warn"
+    },
+    "test": {
+      "database": "mongodb://localhost:27017/defaultproject_test",
+      "emailService": "ethereal",
+      "logLevel": "error"
+    }
+  },
+  "security": {
+    "passwordRequirements": {
+      "minLength": 8,
+      "requireUppercase": true,
+      "requireLowercase": true,
+      "requireNumbers": true,
+      "requireSpecialChars": true
+    },
+    "corsOrigins": [
+      "http://localhost:3000",
+      "https://defaultproject.com"
+    ]
+  },
+  "emailTemplates": {
+    "passwordReset": {
+      "subject": "DefaultProject Password Reset Request",
+      "body": "You requested a password reset. Use this token: {{token}}"
+    },
+    "welcome": {
+      "subject": "Welcome to DefaultProject!",
+      "body": "Thank you for registering with DefaultProject."
+    }
+  }
+}
