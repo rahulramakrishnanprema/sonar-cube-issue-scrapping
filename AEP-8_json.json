@@ -1,0 +1,29 @@
+# Issue: AEP-8
+# Generated: 2025-09-22T16:39:40.960934
+# Thread: ea27aa77
+# Enhanced: LangChain structured generation
+# AI Model: None
+# Max Length: 25000 characters
+
+import java.io.File;
+import java.io.FileReader;
+import java.io.BufferedReader;
+import java.io.IOException;
+
+public class {filename} {
+    
+    public static void main(String[] args) {
+        try {
+            File file = new File("input.txt");
+            FileReader fr = new FileReader(file);
+            BufferedReader br = new BufferedReader(fr);
+            String line;
+            while ((line = br.readLine()) != null) {
+                System.out.println(line);
+            }
+            br.close();
+        } catch (IOException e) {
+            System.err.println("Error reading file: " + e.getMessage());
+        }
+    }
+}
