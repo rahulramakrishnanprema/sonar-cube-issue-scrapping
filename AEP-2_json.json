@@ -1,0 +1,55 @@
+{
+  "issueKey": "AEP-2",
+  "authenticationAPIs": {
+    "login": {
+      "endpoint": "/api/login",
+      "method": "POST",
+      "description": "Endpoint to authenticate user and issue JWT token",
+      "request": {
+        "username": "string",
+        "password": "string"
+      },
+      "response": {
+        "token": "string"
+      }
+    },
+    "registration": {
+      "endpoint": "/api/register",
+      "method": "POST",
+      "description": "Endpoint to register new user",
+      "request": {
+        "username": "string",
+        "password": "string",
+        "email": "string"
+      },
+      "response": {
+        "message": "string"
+      }
+    }
+  },
+  "jwtSessionHandling": {
+    "algorithm": "HS256",
+    "expiration": "1h"
+  },
+  "errorHandling": {
+    "invalidLogin": {
+      "message": "Invalid username or password",
+      "status": 401
+    }
+  },
+  "unitTests": {
+    "loginAPI": {
+      "testCases": [
+        {
+          "input": {
+            "username": "testuser",
+            "password": "testpassword"
+          },
+          "expectedOutput": {
+            "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VybmFtZSI6InRlc3R1c2VyIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+          }
+        }
+      ]
+    }
+  }
+}
